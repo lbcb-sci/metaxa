@@ -98,21 +98,23 @@ def mha_forward_fixed(
                 )
             if inference_params is None:
                 if not self.checkpointing:
-                    # TODO Restore this
-                    x_unpad, indices, cu_seqlens, max_seq_len = unpad_input(
-                        qkv, key_padding_mask
-                    )
-                    kwargs = {'cu_seqlens': cu_seqlens, 'max_seqlen': max_seq_len}
+                    if self.use_flash_attn:
+                        qkv_unpad, indices, cu_seqlens, max_seq_len = unpad_input(
+                            qkv, key_padding_mask
+                        )
+                        kwargs = {'cu_seqlens': cu_seqlens, 'max_seqlen': max_seq_len}
 
-                    # qkv ide unutra
-                    context = self.inner_attn(x_unpad, **kwargs)
+                        context = self.inner_attn(qkv_unpad, **kwargs)
 
-                    context = pad_input(
-                        context,
-                        indices,
-                        qkv.size(0),
-                        qkv.size(1),
-                    )
+                        context = pad_input(
+                            context,
+                            indices,
+                            qkv.size(0),
+                            qkv.size(1),
+                        )
+                    else:
+                        kwargs = {'key_padding_mask': key_padding_mask}
+                        context = self.inner_attn(qkv, **kwargs)
                 else:
                     context = torch.utils.checkpoint.checkpoint(
                         self.inner_attn, qkv, **kwargs

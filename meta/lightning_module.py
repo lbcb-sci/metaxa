@@ -1,6 +1,6 @@
 import lightning as L
 from lightning.pytorch.cli import LightningCLI
-from lightning.pytorch.callbacks import ModelCheckpoint
+from lightning.pytorch.callbacks import ModelCheckpoint, LearningRateMonitor
 from lightning.pytorch.loggers import WandbLogger
 from lightning.pytorch.utilities import grad_norm
 from jsonargparse import lazy_instance
@@ -8,7 +8,7 @@ import torch
 import torch.nn.functional as F
 from torchmetrics.classification import MulticlassAccuracy, MulticlassF1Score
 
-from models import SimpleKMerModel
+from models import KMerEncodingTransformer, CNNEncodingTransformer
 from datasets import MetaDataModule
 from schedulers import get_cosine_schedule_with_warmup
 
@@ -27,9 +27,13 @@ class MetaLightningModule(L.LightningModule):
         self.save_hyperparameters()
         self.hparams['n_classes'] = n_classes
 
-        f_in = 5 * kmer_len
-        self.backbone = SimpleKMerModel(f_in, n_classes)
-        # self.backbone = QuartzNet(5, n_classes)
+        # KMER model
+        # f_in = 5 * kmer_len
+        # self.backbone = SimpleKMerModel(f_in, n_classes)
+
+        # CNN model
+        f_in = 4
+        self.backbone = CNNEncodingTransformer(f_in, 512, 8, 8, 2048, n_classes)
 
         self.train_acc = MulticlassAccuracy(n_classes)
         self.train_f1 = MulticlassF1Score(n_classes)
@@ -92,6 +96,7 @@ class MetaLightningModule(L.LightningModule):
 
 class MetaLightningCLI(LightningCLI):
     def add_arguments_to_parser(self, parser):
+        # ModelCheckpoint
         parser.add_lightning_class_args(ModelCheckpoint, 'mc')
         parser.set_defaults(
             {
@@ -102,6 +107,10 @@ class MetaLightningCLI(LightningCLI):
             }
         )
 
+        # LearningRateMonitor
+        parser.add_lightning_class_args(LearningRateMonitor, 'lrm')
+
+        # Use wandb logger
         parser.set_defaults(
             {'trainer.logger': lazy_instance(WandbLogger, project='meta_classifier')}
         )

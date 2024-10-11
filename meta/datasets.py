@@ -17,10 +17,11 @@ from collections import Counter
 from itertools import product, chain
 import importlib.util
 from more_itertools import grouper
+import math
 
 from typing import List, Tuple
 
-
+BASES_ENCODING = {b: i for i, b in enumerate('ACGT')}
 BASES_DECODING = {i: b for i, b in enumerate('ACGT')}
 KMER_ENCODING = {k: i for i, k in enumerate(product('ACGT', repeat=5))}
 KMER_ENCODING['CLS'] = len(KMER_ENCODING)
@@ -122,11 +123,21 @@ class RefSeqDataset(IterableDataset):
 
             # Cap sequence to 1000 bp
             s = s[:1000]
-
-            g = grouper(s, 5, incomplete='ignore')  # Ignore partial (last) kmer
-            s = torch.tensor([KMER_ENCODING[k] for k in chain(['CLS'], g)])
+            s = one_hot_encoding(s)
 
             yield s, seq_id
+
+
+def kmer_encoding_fn(seq):
+    g = grouper(seq, 5, incomplete='ignore')  # Ignore partial (last) kmer
+    s = torch.tensor([KMER_ENCODING[k] for k in chain(['CLS'], g)])
+
+    return s
+
+
+def one_hot_encoding(seq):
+    x = torch.tensor([BASES_ENCODING[b] for b in seq])
+    return F.one_hot(x, len(BASES_ENCODING)).float()  # L x 4
 
 
 class BadReadTransform:
@@ -167,10 +178,21 @@ class BadReadTransform:
 def train_collate_fn(batch):
     x, y = zip(*batch)
 
-    x = torch.nn.utils.rnn.pad_sequence(
+    # KMER Encoding
+    """x = torch.nn.utils.rnn.pad_sequence(
         x, batch_first=True, padding_value=KMER_ENCODING['PAD']
     )
-    attn_mask = x != KMER_ENCODING['PAD']
+    attn_mask = x != KMER_ENCODING['PAD']"""
+
+    # CNN Model
+    lens = torch.tensor([b.shape[0] // 5 + 1 for b in x])  # +1 for CLS token
+    arange = torch.arange(lens.max()).expand((len(lens), -1))
+    attn_mask = arange < lens.unsqueeze(-1)
+
+    x = torch.nn.utils.rnn.pad_sequence(
+        x, batch_first=True, padding_value=0.0
+    )  # B x L x 4
+
     y = torch.tensor(y)
 
     return x, attn_mask, y

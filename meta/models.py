@@ -42,7 +42,7 @@ class FFBlock(nn.Module):
         return self.layers(x)
 
 
-class SimpleKMerModel(nn.Module):
+class KMerEncodingTransformer(nn.Module):
     def __init__(self, f_in: int, f_out: int) -> None:
         super().__init__()
 
@@ -60,6 +60,45 @@ class SimpleKMerModel(nn.Module):
         x = self.encoder(x, key_padding_mask=attn_mask)
 
         return self.fc(x)
+
+
+class CNNEncodingTransformer(nn.Module):
+    def __init__(
+        self,
+        f_in: int,
+        d_model: int,
+        n_layers: int,
+        n_heads: int,
+        dim_ff: int,
+        f_out: int,
+    ) -> None:
+        super().__init__()
+
+        self.embedding = nn.Conv1d(
+            f_in, d_model, kernel_size=31, stride=5, padding=13, bias=False
+        )
+
+        self.cls_token = nn.Parameter(torch.zeros(1, 1, d_model))
+
+        self.encoder = TransformerEncoder(
+            n_layers, d_model, n_heads, dim_ff, use_flash_attn=USE_FLASH_ATTN
+        )
+        self.fc = nn.Linear(512, f_out)
+
+        self.reset_parameters()
+
+    def forward(self, x: torch.Tensor, attn_mask=None) -> torch.Tensor:
+        x = x.transpose(1, 2)  # N x L x 4 -> N x 4 x L
+        x = self.embedding(x)  # N x 4 x L -> N x 512 x L/5
+        x = x.transpose(1, 2)  # N x 512 x L/5 -> N x L/5 x 512
+
+        x = torch.cat((self.cls_token.expand(x.shape[0], -1, -1), x), dim=1)
+        x = self.encoder(x, key_padding_mask=attn_mask)
+
+        return self.fc(x)
+
+    def reset_parameters(self):
+        nn.init.normal_(self.cls_token, std=1e-6)
 
 
 class TransformerEncoder(nn.Module):
@@ -86,6 +125,7 @@ class TransformerEncoder(nn.Module):
         for layer in self.layers[1:]:
             layer.mixer.rotary_emb = self.layers[0].mixer.rotary_emb
 
+        self.dropout = nn.Dropout(p=dropout)
         self.norm = RMSNorm(d_model)
 
     def forward(self, hidden_states, key_padding_mask=None, subset_mask=None):
@@ -156,8 +196,14 @@ class TransformerEncoder(nn.Module):
                 )
 
         # TODO: Use subset mask from flash attention for last layer
-        x = self.norm(hidden_states[:, 0])
-        return x
+        # TODO: IT SHOULD BE ADD + DROPOUT + LN -> Return this for KMER
+        # x = self.norm(hidden_states[:, 0])
+
+        hidden_states, residual = hidden_states[:, 0], residual[:, 0]
+        residual = self.dropout(hidden_states) + residual
+        hidden_states = self.norm(residual.to(dtype=self.norm.weight.dtype))
+
+        return hidden_states
 
 
 def create_block(
@@ -184,6 +230,7 @@ def create_block(
         prenorm=True,
         resid_dropout1=dropout,
         resid_dropout2=dropout,
+        residual_in_fp32=True,
     )
 
     return block
