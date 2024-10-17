@@ -5,6 +5,7 @@ from lightning.pytorch.loggers import WandbLogger
 from lightning.pytorch.utilities import grad_norm
 from jsonargparse import lazy_instance
 import torch
+import torch.nn as nn
 import torch.nn.functional as F
 from torchmetrics.classification import MulticlassAccuracy, MulticlassF1Score
 
@@ -16,6 +17,7 @@ from schedulers import get_cosine_schedule_with_warmup
 class MetaLightningModule(L.LightningModule):
     def __init__(
         self,
+        backbone: nn.Module,
         kmer_len: int,
         n_classes: int,
         lr: float = 3e-4,
@@ -32,8 +34,8 @@ class MetaLightningModule(L.LightningModule):
         # self.backbone = SimpleKMerModel(f_in, n_classes)
 
         # CNN model
-        f_in = 4
-        self.backbone = CNNEncodingTransformer(f_in, 512, 8, 8, 2048, n_classes)
+        #f_in = 4
+        #self.backbone = CNNEncodingTransformer(f_in, 512, 8, 8, 2048, n_classes)
 
         self.train_acc = MulticlassAccuracy(n_classes)
         self.train_f1 = MulticlassF1Score(n_classes)
@@ -116,10 +118,10 @@ class MetaLightningCLI(LightningCLI):
         )
 
         parser.link_arguments('data.kmer_len', 'model.kmer_len')
-        parser.link_arguments(
+        '''parser.link_arguments(
             'data.n_classes', 'model.n_classes', apply_on='instantiate'
-        )
-
+        )'''
+        parser.link_arguments('data.n_classes', 'model.backbone.init_args.out_features', apply_on='instantiate')
 
 if __name__ == '__main__':
     cli = MetaLightningCLI(
