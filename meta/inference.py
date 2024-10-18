@@ -1,4 +1,5 @@
 import torch
+import torch.nn.functional as F
 import torch.utils
 from torch.utils.data import IterableDataset, DataLoader
 from Bio import SeqIO
@@ -13,7 +14,7 @@ from contextlib import ExitStack
 from itertools import chain
 
 from lightning_module import MetaLightningModule
-from datasets import KMER_ENCODING
+from datasets import one_hot_encoding
 
 FASTA_EXTENSIONS = {'.fasta', '.fa', '.fna'}
 FASTQ_EXTENSIONS = {'.fastq', '.fq'}
@@ -46,18 +47,27 @@ class InferenceDataset(IterableDataset):
                     0, len(sequence) - self.chunk_len + 1, self.chunk_len
                 ):
                     seq = sequence[start : start + self.chunk_len]
+                    x = one_hot_encoding(seq)
 
-                    g = grouper(
+                    """g = grouper(
                         seq, 5, incomplete='ignore'
                     )  # Ignore partial (last) kmer
-                    x = torch.tensor([KMER_ENCODING[k] for k in chain(['CLS'], g)])
+                    x = torch.tensor([KMER_ENCODING[k] for k in chain(['CLS'], g)])"""
 
                     yield record.id, start // self.chunk_len, x
 
 
 def infer_collate_fn(batch):
     ids, indices, x = zip(*batch)
-    return ids, indices, torch.stack(x, dim=0)
+
+    # CNN Model
+    lens = torch.tensor([b.shape[0] for b in x])  # +1 for CLS token
+
+    x = torch.nn.utils.rnn.pad_sequence(
+        x, batch_first=True, padding_value=0.0
+    )  # B x L x 4
+
+    return ids, indices, x, lens
 
 
 def worker_init_fn(worker_id):
@@ -95,8 +105,10 @@ def main(args: argparse.Namespace):
         # Header
         print('read_id', 'window_id', 'logits', 'class', sep='\t', file=output)
 
-        for ids, indices, x in tqdm(dl):
-            y = model(x.to(device))
+        for ids, indices, x, lens in tqdm(dl):
+            x = x.to(dtype=model.dtype, device=device)
+            lens = lens.to(device)
+            y = model(x, lens)
 
             for id, idx, probs in zip(
                 ids, indices, y.to(device='cpu', dtype=torch.float16).numpy()
