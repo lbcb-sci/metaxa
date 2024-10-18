@@ -27,6 +27,8 @@ try:
 except RuntimeError:
     USE_FLASH_ATTN = False
 
+from typing import Optional
+
 
 class FFBlock(nn.Module):
     def __init__(self, f_in: int, f_out: int) -> None:
@@ -74,8 +76,9 @@ class CNNEncodingTransformer(nn.Module):
     ) -> None:
         super().__init__()
 
+        self.stride = 5
         self.embedding = nn.Conv1d(
-            f_in, d_model, kernel_size=31, stride=5, padding=13, bias=False
+            f_in, d_model, kernel_size=31, stride=self.stride, padding=13, bias=False
         )
 
         self.cls_token = nn.Parameter(torch.zeros(1, 1, d_model))
@@ -87,18 +90,33 @@ class CNNEncodingTransformer(nn.Module):
 
         self.reset_parameters()
 
-    def forward(self, x: torch.Tensor, attn_mask=None) -> torch.Tensor:
+    def forward(
+        self, x: torch.Tensor, lens: Optional[torch.Tensor] = None
+    ) -> torch.Tensor:
         x = x.transpose(1, 2)  # N x L x 4 -> N x 4 x L
         x = self.embedding(x)  # N x 4 x L -> N x 512 x L/5
         x = x.transpose(1, 2)  # N x 512 x L/5 -> N x L/5 x 512
 
         x = torch.cat((self.cls_token.expand(x.shape[0], -1, -1), x), dim=1)
+        attn_mask = (
+            None if lens is None else self.create_attn_mask(lens, self.cls_token.device)
+        )
+
         x = self.encoder(x, key_padding_mask=attn_mask)
 
         return self.fc(x)
 
     def reset_parameters(self):
         nn.init.normal_(self.cls_token, std=1e-6)
+
+    def create_attn_mask(self, lens: torch.Tensor, device=torch.device) -> torch.Tensor:
+        lens_after_cnn = lens // 5 + 1
+        arange = torch.arange(lens_after_cnn.max(), device=device).expand(
+            (len(lens_after_cnn), -1)
+        )
+        attn_mask = arange < lens_after_cnn.unsqueeze(-1)
+
+        return attn_mask
 
 
 class TransformerEncoder(nn.Module):

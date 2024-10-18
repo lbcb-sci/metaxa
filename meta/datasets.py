@@ -185,9 +185,7 @@ def train_collate_fn(batch):
     attn_mask = x != KMER_ENCODING['PAD']"""
 
     # CNN Model
-    lens = torch.tensor([b.shape[0] // 5 + 1 for b in x])  # +1 for CLS token
-    arange = torch.arange(lens.max()).expand((len(lens), -1))
-    attn_mask = arange < lens.unsqueeze(-1)
+    lens = torch.tensor([b.shape[0] for b in x])  # +1 for CLS token
 
     x = torch.nn.utils.rnn.pad_sequence(
         x, batch_first=True, padding_value=0.0
@@ -195,7 +193,7 @@ def train_collate_fn(batch):
 
     y = torch.tensor(y)
 
-    return x, attn_mask, y
+    return x, lens, y
 
 
 if __name__ == '__main__':

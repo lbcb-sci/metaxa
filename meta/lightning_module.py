@@ -13,6 +13,8 @@ from models import KMerEncodingTransformer, CNNEncodingTransformer
 from datasets import MetaDataModule
 from schedulers import get_cosine_schedule_with_warmup
 
+from typing import Optional
+
 
 class MetaLightningModule(L.LightningModule):
     def __init__(
@@ -42,8 +44,10 @@ class MetaLightningModule(L.LightningModule):
         self.val_acc = MulticlassAccuracy(n_classes)
         self.val_f1 = MulticlassF1Score(n_classes)
 
-    def forward(self, x: torch.Tensor, attn_mask=None) -> torch.Tensor:
-        return self.backbone(x, attn_mask)
+    def forward(
+        self, x: torch.Tensor, lens: Optional[torch.Tensor] = None
+    ) -> torch.Tensor:
+        return self.backbone(x, lens)
 
     def configure_optimizers(self):
         optimizer = torch.optim.AdamW(
@@ -62,8 +66,8 @@ class MetaLightningModule(L.LightningModule):
         }
 
     def training_step(self, batch, batch_idx):
-        x, attn_mask, y = batch
-        preds = self(x, attn_mask)
+        x, lens, y = batch
+        preds = self(x, lens)
 
         loss = F.cross_entropy(preds, y, label_smoothing=self.hparams.smoothing)
         self.log('train_loss_step', loss, prog_bar=True)
@@ -77,8 +81,8 @@ class MetaLightningModule(L.LightningModule):
         return loss
 
     def validation_step(self, batch, batch_idx):
-        x, attn_mask, y = batch
-        preds = self(x, attn_mask)
+        x, lens, y = batch
+        preds = self(x, lens)
 
         loss = F.cross_entropy(preds, y)
 
