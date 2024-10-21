@@ -57,7 +57,7 @@ class MetaDataModule(L.LightningDataModule):
 
     def train_dataloader(self):
         return DataLoader(
-            RefSeqDataset(self.files, self.kmer_len),
+            RefSeqDataset(self.files, self.kmer_len, 'train'),
             batch_size=self.train_batch_size,
             num_workers=16,
             collate_fn=train_collate_fn,
@@ -66,7 +66,7 @@ class MetaDataModule(L.LightningDataModule):
 
     def val_dataloader(self):
         return DataLoader(
-            RefSeqDataset(self.files, self.kmer_len),
+            RefSeqDataset(self.files, self.kmer_len, 'val'),
             batch_size=self.val_batch_size,
             num_workers=16,
             collate_fn=train_collate_fn,
@@ -82,10 +82,11 @@ def reverse_complement(seq: str) -> str:
 
 
 class RefSeqDataset(IterableDataset):
-    def __init__(self, files: List[Path], kmer_len: int) -> None:
+    def __init__(self, files: List[Path], kmer_len: int, mode: str) -> None:
         super().__init__()
         self.badread = BadReadTransform()
         self.kmer_len = kmer_len
+        self.mode = mode
 
         self.ids, self.sequences = [], []
         for path in files:
@@ -109,15 +110,18 @@ class RefSeqDataset(IterableDataset):
             seq = self.sequences[seq_id]
 
             start = random.randrange(len(seq) - self.kmer_len + 1)
-            s = seq[start : start + self.kmer_len]
+            original = seq[start : start + self.kmer_len]
 
             # Transforms
             # TODO N's are replaced randomly
-            s = [BASES_DECODING[random.randint(0, 3)] if b == 'N' else b for b in s]
-            s = reverse_complement(s)
+            original = [
+                BASES_DECODING[random.randint(0, 3)] if b == 'N' else b
+                for b in original
+            ]
+            original = reverse_complement(original)
 
             # BadRead transfomrm -> make sure it is long enough
-            s = self.badread(s)
+            s = self.badread(original)
             if len(s) < 500:
                 continue
 
@@ -125,7 +129,11 @@ class RefSeqDataset(IterableDataset):
             s = s[:1000]
             s = one_hot_encoding(s)
 
-            yield s, seq_id
+            yield (
+                s,
+                seq_id,
+                one_hot_encoding(original) if self.mode == 'train' else None,
+            )
 
 
 def kmer_encoding_fn(seq):
@@ -176,13 +184,16 @@ class BadReadTransform:
 
 
 def train_collate_fn(batch):
-    x, y = zip(*batch)
+    x, y, original = zip(*batch)
 
     # KMER Encoding
     """x = torch.nn.utils.rnn.pad_sequence(
         x, batch_first=True, padding_value=KMER_ENCODING['PAD']
     )
     attn_mask = x != KMER_ENCODING['PAD']"""
+
+    if original[0] is not None:
+        x = original + x
 
     # CNN Model
     lens = torch.tensor([b.shape[0] for b in x])  # +1 for CLS token

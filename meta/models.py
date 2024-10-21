@@ -67,7 +67,6 @@ class KMerEncodingTransformer(nn.Module):
 class CNNEncodingTransformer(nn.Module):
     def __init__(
         self,
-        f_in: int,
         d_model: int,
         n_layers: int,
         n_heads: int,
@@ -76,7 +75,9 @@ class CNNEncodingTransformer(nn.Module):
     ) -> None:
         super().__init__()
 
+        f_in = 4  # One-hot encoded sequence
         self.stride = 5
+
         self.embedding = nn.Conv1d(
             f_in, d_model, kernel_size=31, stride=self.stride, padding=13, bias=False
         )
@@ -86,7 +87,7 @@ class CNNEncodingTransformer(nn.Module):
         self.encoder = TransformerEncoder(
             n_layers, d_model, n_heads, dim_ff, use_flash_attn=USE_FLASH_ATTN
         )
-        self.fc = nn.Linear(512, f_out)
+        self.fc = nn.Linear(d_model, f_out)
 
         self.reset_parameters()
 
@@ -104,7 +105,7 @@ class CNNEncodingTransformer(nn.Module):
 
         x = self.encoder(x, key_padding_mask=attn_mask)
 
-        return self.fc(x)
+        return self.fc(x), x
 
     def reset_parameters(self):
         nn.init.normal_(self.cls_token, std=1e-6)
