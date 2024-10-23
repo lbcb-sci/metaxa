@@ -153,7 +153,7 @@ class BadReadTransform:
         self,
         identity_params: Tuple[float, float, float] = (90, 98, 5),
         error_model: str = 'nanopore2020',
-        glitch_params: Tuple[float, float, float] = (1000, 25, 25),
+        glitch_params: Tuple[float, float, float] = (10000, 25, 25),
     ):
         folder = Path(importlib.util.find_spec('badread').origin).parent
 
@@ -196,15 +196,24 @@ def train_collate_fn(batch):
         x = original + x
 
     # CNN Model
-    lens = torch.tensor([b.shape[0] for b in x])  # +1 for CLS token
+    lens = torch.tensor([b.shape[0] for b in x])
 
     x = torch.nn.utils.rnn.pad_sequence(
         x, batch_first=True, padding_value=0.0
     )  # B x L x 4
 
+    """if original[0] is not None:
+        lens_o = torch.tensor([o.shape[0] for o in original])
+        o = torch.nn.utils.rnn.pad_sequence(
+            original, batch_first=True, padding_value=0.0
+        )
+    else:
+        o, lens_o = None, None"""
+
     y = torch.tensor(y)
 
     return x, lens, y
+    # return x, lens, o, lens_o, y
 
 
 if __name__ == '__main__':
