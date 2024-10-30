@@ -87,7 +87,7 @@ class CNNEncodingTransformer(nn.Module):
         self.encoder = TransformerEncoder(
             n_layers, d_model, n_heads, dim_ff, use_flash_attn=USE_FLASH_ATTN
         )
-        # self.fc = nn.Linear(d_model, f_out)
+        self.fc = nn.Linear(d_model, f_out)
 
         self.reset_parameters()
 
@@ -105,8 +105,7 @@ class CNNEncodingTransformer(nn.Module):
 
         x = self.encoder(x, key_padding_mask=attn_mask)
 
-        return x
-        # return self.fc(x), x
+        return self.fc(x), x
 
     def reset_parameters(self):
         nn.init.normal_(self.cls_token, std=1e-6)

@@ -13,11 +13,12 @@ from torchmetrics.classification import MulticlassAccuracy, MulticlassF1Score
 from datasets import MetaDataModule
 from schedulers import get_cosine_schedule_with_warmup
 from losses import nt_xent_loss
+from models import CNNEncodingTransformer
 
 from typing import Optional
 
 
-class MetaLightningModule(L.LightningModule):
+class MetaContLightningModule(L.LightningModule):
     def __init__(
         self,
         backbone: nn.Module,
@@ -39,6 +40,20 @@ class MetaLightningModule(L.LightningModule):
         # f_in = 4
         # self.backbone = CNNEncodingTransformer(f_in, 512, 8, 8, 2048, n_classes)
         self.backbone = backbone
+        self.backbone.fc = nn.Identity()
+
+        self.teacher = CNNEncodingTransformer(512, 4, 4, 2048, 516)
+        state_dict = torch.load(
+            '/home/users/astar/gis/stanojevicd/projects/meta_classifier/perfect_seqs_state_dict.pth',
+            map_location=self.device,
+        )
+        self.teacher.load_state_dict(state_dict)
+
+        for param in self.teacher.parameters():
+            param.requires_grad = False
+
+        self.teacher.eval()
+
         # self.head = nn.Sequential(nn.Linear(512, 128))
 
         self.train_acc = MulticlassAccuracy(n_classes)
@@ -49,7 +64,9 @@ class MetaLightningModule(L.LightningModule):
     def forward(
         self, x: torch.Tensor, lens: Optional[torch.Tensor] = None
     ) -> torch.Tensor:
-        x, _ = self.backbone(x, lens)
+        _, cls = self.backbone(x, lens)
+        x = self.teacher.fc(cls)
+
         return x
 
     def configure_optimizers(self):
@@ -70,26 +87,29 @@ class MetaLightningModule(L.LightningModule):
 
     def training_step(self, batch, batch_idx):
         x, lens, y = batch
-        preds, _ = self.backbone(x, lens)  # tf -> transformed
+        N = len(x) // 2
+
+        _, cls_t = self.backbone(x[:N], lens[:N])  # tf -> transformed
+        _, cls_o = self.teacher(x[N:], lens[N:])
         # cls_tokens = self.backbone(x, lens)  # tf -> transformed
         # cls_tokens = self.head(cls_tokens)
 
         # preds = preds[: len(y)]
-        z_o, z_t = torch.split(preds, len(y))
+        # z_o, z_t = torch.split(preds, len(y))
 
-        """if torch.distributed.get_rank() == 0 and batch_idx % 1000 == 0:
-            torch.save(z_o.detach(), f'z_o_{batch_idx}.pt')
-            torch.save(z_t.detach(), f'z_t_{batch_idx}.pt')"""
-
-        contrastive_loss = nt_xent_loss(z_t, z_o)
+        # contrastive_loss = nt_xent_loss(cls_t, cls_o)
+        contrastive_loss = F.mse_loss(cls_t, cls_o)
         self.log('train_contrastive_loss_step', contrastive_loss)
 
-        y = torch.cat([y, y], dim=0)
-        preds_loss = F.cross_entropy(preds, y, label_smoothing=self.hparams.smoothing)
-        self.log('train_preds_loss_step', preds_loss)
+        # y = torch.cat([y, y], dim=0)
+        # preds_loss = F.cross_entropy(preds, y, label_smoothing=self.hparams.smoothing)
+        # self.log('train_preds_loss_step', preds_loss)
 
-        loss = preds_loss + contrastive_loss
+        # loss = preds_loss + contrastive_loss
+        loss = contrastive_loss
         self.log('train_loss_step', loss, prog_bar=True)
+
+        preds = self.teacher.fc(cls_t)
 
         self.train_acc(preds, y)
         self.log('train_acc_step', self.train_acc)
@@ -153,5 +173,5 @@ class MetaLightningCLI(LightningCLI):
 
 if __name__ == '__main__':
     cli = MetaLightningCLI(
-        MetaLightningModule, MetaDataModule, save_config_kwargs={'overwrite': True}
+        MetaContLightningModule, MetaDataModule, save_config_kwargs={'overwrite': True}
     )

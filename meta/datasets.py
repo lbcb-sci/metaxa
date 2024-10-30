@@ -151,7 +151,7 @@ def one_hot_encoding(seq):
 class BadReadTransform:
     def __init__(
         self,
-        identity_params: Tuple[float, float, float] = (90, 98, 5),
+        identity_params: Tuple[float, float, float] = (95, 100, 2.5),
         error_model: str = 'nanopore2020',
         glitch_params: Tuple[float, float, float] = (10000, 25, 25),
     ):
@@ -185,6 +185,7 @@ class BadReadTransform:
 
 def train_collate_fn(batch):
     x, y, original = zip(*batch)
+    # x, y = zip(*batch)
 
     # KMER Encoding
     """x = torch.nn.utils.rnn.pad_sequence(
@@ -202,18 +203,9 @@ def train_collate_fn(batch):
         x, batch_first=True, padding_value=0.0
     )  # B x L x 4
 
-    """if original[0] is not None:
-        lens_o = torch.tensor([o.shape[0] for o in original])
-        o = torch.nn.utils.rnn.pad_sequence(
-            original, batch_first=True, padding_value=0.0
-        )
-    else:
-        o, lens_o = None, None"""
-
     y = torch.tensor(y)
 
     return x, lens, y
-    # return x, lens, o, lens_o, y
 
 
 if __name__ == '__main__':
