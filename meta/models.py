@@ -78,16 +78,18 @@ class CNNEncodingTransformer(nn.Module):
         f_in = 4  # One-hot encoded sequence
         self.stride = 5
 
-        self.embedding = nn.Conv1d(
-            f_in, d_model, kernel_size=31, stride=self.stride, padding=13, bias=False
-        )
+        """self.embedding = nn.Conv1d(
+            f_in, d_model, kernel_size=31, stride=self.stride, bias=False
+        )"""
+        self.embedding = nn.Conv1d(f_in, d_model, kernel_size=31, bias=False)
+        self.pool = nn.MaxPool1d(kernel_size=5, stride=5)
 
-        self.cls_token = nn.Parameter(torch.zeros(1, 1, d_model))
+        # self.cls_token = nn.Parameter(torch.zeros(1, 1, d_model))
 
         self.encoder = TransformerEncoder(
             n_layers, d_model, n_heads, dim_ff, use_flash_attn=USE_FLASH_ATTN
         )
-        self.fc = nn.Linear(d_model, f_out)
+        self.fc = nn.Linear(d_model, f_out + 1)  # Add not present
 
         self.reset_parameters()
 
@@ -96,22 +98,23 @@ class CNNEncodingTransformer(nn.Module):
     ) -> torch.Tensor:
         x = x.transpose(1, 2)  # N x L x 4 -> N x 4 x L
         x = self.embedding(x)  # N x 4 x L -> N x 512 x L/5
+        x = self.pool(x)
         x = x.transpose(1, 2)  # N x 512 x L/5 -> N x L/5 x 512
 
-        x = torch.cat((self.cls_token.expand(x.shape[0], -1, -1), x), dim=1)
-        attn_mask = (
-            None if lens is None else self.create_attn_mask(lens, self.cls_token.device)
-        )
+        # x = torch.cat((self.cls_token.expand(x.shape[0], -1, -1), x), dim=1)
+        attn_mask = None if lens is None else self.create_attn_mask(lens, lens.device)
 
         x = self.encoder(x, key_padding_mask=attn_mask)
 
-        return self.fc(x), x
+        return self.fc(x)
 
     def reset_parameters(self):
-        nn.init.normal_(self.cls_token, std=1e-6)
+        # nn.init.normal_(self.cls_token, std=1e-6)
+        pass
 
     def create_attn_mask(self, lens: torch.Tensor, device=torch.device) -> torch.Tensor:
-        lens_after_cnn = lens // 5 + 1
+        # lens_after_cnn = torch.floor((lens - 31) / self.stride + 1)
+        lens_after_cnn = torch.floor((lens - 35) / self.stride + 1)
         arange = torch.arange(lens_after_cnn.max(), device=device).expand(
             (len(lens_after_cnn), -1)
         )
@@ -218,7 +221,7 @@ class TransformerEncoder(nn.Module):
         # TODO: IT SHOULD BE ADD + DROPOUT + LN -> Return this for KMER
         # x = self.norm(hidden_states[:, 0])
 
-        hidden_states, residual = hidden_states[:, 0], residual[:, 0]
+        # hidden_states, residual = hidden_states[:, 0], residual[:, 0]
         residual = self.dropout(hidden_states) + residual
         hidden_states = self.norm(residual.to(dtype=self.norm.weight.dtype))
 

@@ -10,6 +10,7 @@ from badread.identities import Identities
 from badread.error_model import ErrorModel
 from badread.simulate import add_glitches
 from badread.simulate import sequence_fragment
+import edlib
 
 from pathlib import Path
 import random
@@ -17,6 +18,8 @@ from collections import Counter
 from itertools import product, chain
 import importlib.util
 from more_itertools import grouper
+import re
+from collections import deque
 import math
 
 from typing import List, Tuple
@@ -127,13 +130,14 @@ class RefSeqDataset(IterableDataset):
 
             # Cap sequence to 1000 bp
             s = s[:1000]
-            s = one_hot_encoding(s)
 
-            yield (
-                s,
-                seq_id,
-                one_hot_encoding(original) if self.mode == 'train' else None,
+            matches = {m[0] // 5 for m in get_matches(s, original)}
+            length = math.floor((len(s) - 31) / 5 + 1)
+            y = torch.tensor(
+                [seq_id if i in matches else self.n_classes for i in range(length)]
             )
+
+            yield seq_id, one_hot_encoding(s), y
 
 
 def kmer_encoding_fn(seq):
@@ -184,7 +188,7 @@ class BadReadTransform:
 
 
 def train_collate_fn(batch):
-    x, y, original = zip(*batch)
+    ids, x, y = zip(*batch)
     # x, y = zip(*batch)
 
     # KMER Encoding
@@ -193,9 +197,6 @@ def train_collate_fn(batch):
     )
     attn_mask = x != KMER_ENCODING['PAD']"""
 
-    if original[0] is not None:
-        x = original + x
-
     # CNN Model
     lens = torch.tensor([b.shape[0] for b in x])
 
@@ -203,9 +204,9 @@ def train_collate_fn(batch):
         x, batch_first=True, padding_value=0.0
     )  # B x L x 4
 
-    y = torch.tensor(y)
+    y = torch.nn.utils.rnn.pad_sequence(y, batch_first=True, padding_value=-1)
 
-    return x, lens, y
+    return ids, x, lens, y
 
 
 if __name__ == '__main__':
@@ -224,3 +225,35 @@ if __name__ == '__main__':
             counter.update(list(s))
 
     print(counter)
+
+
+def get_matches(query, target, kmer_len=31, step=1):
+    qpos, rpos = 0, 0
+    d = deque(maxlen=kmer_len)
+    matches = []
+
+    cigar = edlib.align(query, target, task='path')['cigar']
+    for m in re.finditer(r'(\d+)([=XDI])', cigar):
+        l, op = int(m.group(1)), m.group(2)
+
+        for _ in range(l):
+            d.append(op)
+
+            if op == '=' or op == 'X':
+                qpos += 1
+                rpos += 1
+            elif op == 'I':
+                qpos += 1
+            elif op == 'D':
+                rpos += 1
+            else:
+                raise ValueError('Invalid cigar op')
+
+            if qpos >= kmer_len:
+                if qpos % step == 0:
+                    match = all(map(lambda o: o == '=', d))
+                    if match:
+                        kmer = query[qpos - kmer_len : qpos]
+                        matches.append((qpos - kmer_len, kmer))
+
+    return matches

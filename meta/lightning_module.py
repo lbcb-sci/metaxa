@@ -9,6 +9,9 @@ import torch.distributed
 import torch.nn as nn
 import torch.nn.functional as F
 from torchmetrics.classification import MulticlassAccuracy, MulticlassF1Score
+from flash_attn.ops.triton.layer_norm import RMSNorm
+
+from collections import Counter
 
 from datasets import MetaDataModule
 from schedulers import get_cosine_schedule_with_warmup
@@ -41,22 +44,37 @@ class MetaLightningModule(L.LightningModule):
         self.backbone = backbone
         # self.head = nn.Sequential(nn.Linear(512, 128))
 
-        self.train_acc = MulticlassAccuracy(n_classes)
-        self.train_f1 = MulticlassF1Score(n_classes)
-        self.val_acc = MulticlassAccuracy(n_classes)
-        self.val_f1 = MulticlassF1Score(n_classes)
+        self.train_acc = MulticlassAccuracy(n_classes + 1, ignore_index=-1)
+        self.train_f1 = MulticlassF1Score(n_classes + 1, ignore_index=-1)
+        self.val_acc = MulticlassAccuracy(n_classes + 1, ignore_index=-1)
+        self.val_f1 = MulticlassF1Score(n_classes + 1, ignore_index=-1)
 
     def forward(
         self, x: torch.Tensor, lens: Optional[torch.Tensor] = None
     ) -> torch.Tensor:
-        x, _ = self.backbone(x, lens)
+        x = self.backbone(x, lens)
         return x
 
     def configure_optimizers(self):
+        decay_params = get_parameter_names(self, [RMSNorm])
+        decay_params = [name for name in decay_params if 'bias' not in name]
+
+        grouped_params = [
+            {
+                'params': [p for n, p in self.named_parameters() if n in decay_params],
+                'weight_decay': self.hparams.wd,
+            },
+            {
+                'params': [
+                    p for n, p in self.named_parameters() if n not in decay_params
+                ],
+                'weight_decay': 0.0,
+            },
+        ]
+
         optimizer = torch.optim.AdamW(
-            self.parameters(),
+            grouped_params,
             self.hparams.lr,
-            weight_decay=self.hparams.wd,
         )
 
         scheduler = get_cosine_schedule_with_warmup(
@@ -69,26 +87,15 @@ class MetaLightningModule(L.LightningModule):
         }
 
     def training_step(self, batch, batch_idx):
-        x, lens, y = batch
-        preds, _ = self.backbone(x, lens)  # tf -> transformed
-        # cls_tokens = self.backbone(x, lens)  # tf -> transformed
-        # cls_tokens = self.head(cls_tokens)
+        ids, x, lens, y = batch
+        preds = self.backbone(x, lens).transpose(1, 2)
 
-        # preds = preds[: len(y)]
-        z_o, z_t = torch.split(preds, len(y))
-
-        """if torch.distributed.get_rank() == 0 and batch_idx % 1000 == 0:
-            torch.save(z_o.detach(), f'z_o_{batch_idx}.pt')
-            torch.save(z_t.detach(), f'z_t_{batch_idx}.pt')"""
-
-        contrastive_loss = nt_xent_loss(z_t, z_o)
-        self.log('train_contrastive_loss_step', contrastive_loss)
-
-        y = torch.cat([y, y], dim=0)
-        preds_loss = F.cross_entropy(preds, y, label_smoothing=self.hparams.smoothing)
+        preds_loss = F.cross_entropy(
+            preds, y, label_smoothing=self.hparams.smoothing, ignore_index=-1
+        )
         self.log('train_preds_loss_step', preds_loss)
 
-        loss = preds_loss + contrastive_loss
+        loss = preds_loss
         self.log('train_loss_step', loss, prog_bar=True)
 
         self.train_acc(preds, y)
@@ -100,10 +107,25 @@ class MetaLightningModule(L.LightningModule):
         return loss
 
     def validation_step(self, batch, batch_idx):
-        x, lens, y = batch
-        preds = self(x, lens)
+        ids, x, lens, y = batch
+        preds = self(x, lens).transpose(1, 2)
 
-        loss = F.cross_entropy(preds, y)
+        loss = F.cross_entropy(preds, y, ignore_index=-1)
+
+        preds = torch.argmax(preds, dim=1).cpu().numpy()
+        pred_cls = []
+        lens = torch.floor((lens - 31) / 5 + 1).int()
+        for p, l in zip(preds, lens):
+            c = Counter(p[:l].tolist())
+            del c[516]
+
+            if len(c) == 0:
+                pred_cls.append(516)
+            else:
+                pred_cls.append(c.most_common(1)[0][0])
+
+        preds = torch.tensor(pred_cls, device=self.device)
+        y = torch.tensor(ids, device=self.device)
 
         self.val_acc(preds, y)
         self.log('val_acc', self.val_acc)
@@ -117,6 +139,22 @@ class MetaLightningModule(L.LightningModule):
     def on_before_optimizer_step(self, optimizer):
         norms = grad_norm(self, norm_type=2)
         self.log_dict(norms)
+
+
+def get_parameter_names(model, forbidden_layer_types):
+    """
+    Returns the names of the model parameters that are not inside a forbidden layer. Taken from transformers package.
+    """
+    result = []
+    for name, child in model.named_children():
+        result += [
+            f'{name}.{n}'
+            for n in get_parameter_names(child, forbidden_layer_types)
+            if not isinstance(child, tuple(forbidden_layer_types))
+        ]
+    # Add model specific parameters (defined with nn.Parameter) since they are not in any child.
+    result += list(model._parameters.keys())
+    return result
 
 
 class MetaLightningCLI(LightningCLI):
