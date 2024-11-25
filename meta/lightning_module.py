@@ -77,10 +77,6 @@ class MetaLightningModule(L.LightningModule):
         # preds = preds[: len(y)]
         z_o, z_t = torch.split(preds, len(y))
 
-        """if torch.distributed.get_rank() == 0 and batch_idx % 1000 == 0:
-            torch.save(z_o.detach(), f'z_o_{batch_idx}.pt')
-            torch.save(z_t.detach(), f'z_t_{batch_idx}.pt')"""
-
         contrastive_loss = nt_xent_loss(z_t, z_o)
         self.log('train_contrastive_loss_step', contrastive_loss)
 
