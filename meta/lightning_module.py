@@ -9,6 +9,8 @@ import torch.distributed
 import torch.nn as nn
 import torch.nn.functional as F
 from torchmetrics.classification import MulticlassAccuracy, MulticlassF1Score
+import wandb
+import wandb.util
 
 from datasets import MetaDataModule
 from schedulers import get_cosine_schedule_with_warmup
@@ -21,7 +23,8 @@ class MetaLightningModule(L.LightningModule):
     def __init__(
         self,
         backbone: nn.Module,
-        n_classes: int,
+        n_species: int,
+        n_genus: int,
         lr: float = 3e-4,
         wd: float = 0.0,
         smoothing: float = 0.0,
@@ -29,28 +32,31 @@ class MetaLightningModule(L.LightningModule):
     ) -> None:
         super().__init__()
         self.save_hyperparameters()
-        self.hparams['n_classes'] = n_classes
+        self.hparams['n_species'] = n_species
+        self.hparams['n_genus'] = n_genus
 
-        # KMER model
-        # f_in = 5 * kmer_len
-        # self.backbone = SimpleKMerModel(f_in, n_classes)
-
-        # CNN model
-        # f_in = 4
-        # self.backbone = CNNEncodingTransformer(f_in, 512, 8, 8, 2048, n_classes)
         self.backbone = backbone
-        # self.head = nn.Sequential(nn.Linear(512, 128))
+        self.fc_species = nn.Linear(backbone.d_model, n_species)
+        self.fc_genus = nn.Linear(backbone.d_model, n_genus)
 
-        self.train_acc = MulticlassAccuracy(n_classes)
-        self.train_f1 = MulticlassF1Score(n_classes)
-        self.val_acc = MulticlassAccuracy(n_classes)
-        self.val_f1 = MulticlassF1Score(n_classes)
+        self.train_acc = MulticlassAccuracy(n_species)
+        self.train_f1 = MulticlassF1Score(n_species)
+        self.val_acc = MulticlassAccuracy(n_species)
+        self.val_f1 = MulticlassF1Score(n_species)
+
+        self.train_acc_genus = MulticlassAccuracy(n_genus)
+        self.train_f1_genus = MulticlassF1Score(n_genus)
+        self.val_acc_genus = MulticlassAccuracy(n_genus)
+        self.val_f1_genus = MulticlassF1Score(n_genus)
 
     def forward(
         self, x: torch.Tensor, lens: Optional[torch.Tensor] = None
     ) -> torch.Tensor:
-        x, _ = self.backbone(x, lens)
-        return x
+        x = self.backbone(x, lens)
+        logits_species = self.fc_species(x)
+        logits_genus = self.fc_genus(x)
+
+        return logits_species, logits_genus
 
     def configure_optimizers(self):
         optimizer = torch.optim.AdamW(
@@ -69,44 +75,56 @@ class MetaLightningModule(L.LightningModule):
         }
 
     def training_step(self, batch, batch_idx):
-        x, lens, y = batch
-        preds, _ = self.backbone(x, lens)  # tf -> transformed
-        # cls_tokens = self.backbone(x, lens)  # tf -> transformed
-        # cls_tokens = self.head(cls_tokens)
+        x, lens, ys, yg = batch
+        logits_species, logits_genus = self(x, lens)
 
-        # preds = preds[: len(y)]
-        z_o, z_t = torch.split(preds, len(y))
+        species_loss = F.cross_entropy(
+            logits_species, ys, label_smoothing=self.hparams.smoothing
+        )
+        self.log('train_loss_step', species_loss)
 
-        contrastive_loss = nt_xent_loss(z_t, z_o)
-        self.log('train_contrastive_loss_step', contrastive_loss)
+        genus_loss = F.cross_entropy(
+            logits_genus, yg, label_smoothing=self.hparams.smoothing
+        )
+        self.log('train_genus_loss_step', genus_loss)
 
-        y = torch.cat([y, y], dim=0)
-        preds_loss = F.cross_entropy(preds, y, label_smoothing=self.hparams.smoothing)
-        self.log('train_preds_loss_step', preds_loss)
+        loss = species_loss + genus_loss
+        self.log('train_total_loss_step', loss, prog_bar=True)
 
-        loss = preds_loss + contrastive_loss
-        self.log('train_loss_step', loss, prog_bar=True)
-
-        self.train_acc(preds, y)
+        self.train_acc(logits_species, ys)
         self.log('train_acc_step', self.train_acc)
 
-        self.train_f1(preds, y)
+        self.train_f1(logits_species, ys)
         self.log('train_f1_step', self.train_f1)
+
+        self.train_acc_genus(logits_genus, yg)
+        self.log('train_acc_genus_step', self.train_acc_genus)
+
+        self.train_f1_genus(logits_genus, yg)
+        self.log('train_f1_genus_step', self.train_f1_genus)
 
         return loss
 
     def validation_step(self, batch, batch_idx):
-        x, lens, y = batch
-        preds = self(x, lens)
+        x, lens, ys, yg = batch
+        logits_species, logits_genus = self(x, lens)
 
-        loss = F.cross_entropy(preds, y)
+        species_loss = F.cross_entropy(logits_species, ys)
+        genus_loss = F.cross_entropy(logits_genus, yg)
 
-        self.val_acc(preds, y)
+        self.val_acc(logits_species, ys)
         self.log('val_acc', self.val_acc)
 
-        self.val_f1(preds, y)
+        self.val_f1(logits_species, ys)
         self.log('val_f1', self.val_f1, prog_bar=True)
 
+        self.val_acc_genus(logits_genus, yg)
+        self.log('val_acc_genus', self.val_acc_genus)
+
+        self.val_f1_genus(logits_genus, yg)
+        self.log('val_f1_genus', self.val_f1_genus, prog_bar=True)
+
+        loss = species_loss + genus_loss
         self.log('val_loss', loss, sync_dist=True)
         return loss
 
@@ -133,18 +151,18 @@ class MetaLightningCLI(LightningCLI):
 
         # Use wandb logger
         parser.set_defaults(
-            {'trainer.logger': lazy_instance(WandbLogger, project='meta_classifier')}
+            {
+                'trainer.logger': lazy_instance(
+                    WandbLogger, project='meta_classifier', id=wandb.util.generate_id()
+                )
+            }
         )
 
         # parser.link_arguments('data.kmer_len', 'model.kmer_len')
         parser.link_arguments(
-            'data.n_classes', 'model.n_classes', apply_on='instantiate'
+            'data.n_species', 'model.n_species', apply_on='instantiate'
         )
-        parser.link_arguments(
-            'data.n_classes',
-            'model.backbone.init_args.f_out',
-            apply_on='instantiate',
-        )
+        parser.link_arguments('data.n_genus', 'model.n_genus', apply_on='instantiate')
 
 
 if __name__ == '__main__':

@@ -71,15 +71,17 @@ class CNNEncodingTransformer(nn.Module):
         n_layers: int,
         n_heads: int,
         dim_ff: int,
-        f_out: int,
     ) -> None:
         super().__init__()
 
+        self.d_model = d_model
+
         f_in = 4  # One-hot encoded sequence
+        self.kernel_size = 31
         self.stride = 5
 
         self.embedding = nn.Conv1d(
-            f_in, d_model, kernel_size=31, stride=self.stride, padding=13, bias=False
+            f_in, d_model, kernel_size=self.kernel_size, stride=self.stride, bias=False
         )
 
         self.cls_token = nn.Parameter(torch.zeros(1, 1, d_model))
@@ -87,7 +89,6 @@ class CNNEncodingTransformer(nn.Module):
         self.encoder = TransformerEncoder(
             n_layers, d_model, n_heads, dim_ff, use_flash_attn=USE_FLASH_ATTN
         )
-        self.fc = nn.Linear(d_model, f_out)
 
         self.reset_parameters()
 
@@ -105,13 +106,13 @@ class CNNEncodingTransformer(nn.Module):
 
         x = self.encoder(x, key_padding_mask=attn_mask)
 
-        return self.fc(x), x
+        return x
 
     def reset_parameters(self):
         nn.init.normal_(self.cls_token, std=1e-6)
 
     def create_attn_mask(self, lens: torch.Tensor, device=torch.device) -> torch.Tensor:
-        lens_after_cnn = lens // 5 + 1
+        lens_after_cnn = (lens - self.kernel_size) // 5 + 1
         arange = torch.arange(lens_after_cnn.max(), device=device).expand(
             (len(lens_after_cnn), -1)
         )
