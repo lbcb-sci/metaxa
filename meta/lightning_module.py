@@ -37,24 +37,25 @@ class MetaLightningModule(L.LightningModule):
 
         self.backbone = backbone
         self.fc_species = nn.Linear(backbone.d_model, n_species)
-        self.fc_genus = nn.Linear(backbone.d_model, n_genus)
+        # self.fc_genus = nn.Linear(backbone.d_model, n_genus)
 
         self.train_acc = MulticlassAccuracy(n_species)
         self.train_f1 = MulticlassF1Score(n_species)
         self.val_acc = MulticlassAccuracy(n_species)
         self.val_f1 = MulticlassF1Score(n_species)
 
-        self.train_acc_genus = MulticlassAccuracy(n_genus)
+        """self.train_acc_genus = MulticlassAccuracy(n_genus)
         self.train_f1_genus = MulticlassF1Score(n_genus)
         self.val_acc_genus = MulticlassAccuracy(n_genus)
-        self.val_f1_genus = MulticlassF1Score(n_genus)
+        self.val_f1_genus = MulticlassF1Score(n_genus)"""
 
     def forward(
         self, x: torch.Tensor, lens: Optional[torch.Tensor] = None
     ) -> torch.Tensor:
         x = self.backbone(x, lens)
         logits_species = self.fc_species(x)
-        logits_genus = self.fc_genus(x)
+        # logits_genus = self.fc_genus(x)
+        logits_genus = None
 
         return logits_species, logits_genus
 
@@ -83,12 +84,13 @@ class MetaLightningModule(L.LightningModule):
         )
         self.log('train_loss_step', species_loss)
 
-        genus_loss = F.cross_entropy(
+        """genus_loss = F.cross_entropy(
             logits_genus, yg, label_smoothing=self.hparams.smoothing
         )
-        self.log('train_genus_loss_step', genus_loss)
+        self.log('train_genus_loss_step', genus_loss)"""
 
-        loss = species_loss + genus_loss
+        # loss = species_loss + genus_loss
+        loss = species_loss
         self.log('train_total_loss_step', loss, prog_bar=True)
 
         self.train_acc(logits_species, ys)
@@ -97,11 +99,11 @@ class MetaLightningModule(L.LightningModule):
         self.train_f1(logits_species, ys)
         self.log('train_f1_step', self.train_f1)
 
-        self.train_acc_genus(logits_genus, yg)
+        """self.train_acc_genus(logits_genus, yg)
         self.log('train_acc_genus_step', self.train_acc_genus)
 
         self.train_f1_genus(logits_genus, yg)
-        self.log('train_f1_genus_step', self.train_f1_genus)
+        self.log('train_f1_genus_step', self.train_f1_genus)"""
 
         return loss
 
@@ -110,7 +112,7 @@ class MetaLightningModule(L.LightningModule):
         logits_species, logits_genus = self(x, lens)
 
         species_loss = F.cross_entropy(logits_species, ys)
-        genus_loss = F.cross_entropy(logits_genus, yg)
+        # genus_loss = F.cross_entropy(logits_genus, yg)
 
         self.val_acc(logits_species, ys)
         self.log('val_acc', self.val_acc)
@@ -118,13 +120,14 @@ class MetaLightningModule(L.LightningModule):
         self.val_f1(logits_species, ys)
         self.log('val_f1', self.val_f1, prog_bar=True)
 
-        self.val_acc_genus(logits_genus, yg)
+        """self.val_acc_genus(logits_genus, yg)
         self.log('val_acc_genus', self.val_acc_genus)
 
         self.val_f1_genus(logits_genus, yg)
-        self.log('val_f1_genus', self.val_f1_genus, prog_bar=True)
+        self.log('val_f1_genus', self.val_f1_genus, prog_bar=True)"""
 
-        loss = species_loss + genus_loss
+        # loss = species_loss + genus_loss
+        loss = species_loss
         self.log('val_loss', loss, sync_dist=True)
         return loss
 
@@ -167,5 +170,8 @@ class MetaLightningCLI(LightningCLI):
 
 if __name__ == '__main__':
     cli = MetaLightningCLI(
-        MetaLightningModule, MetaDataModule, save_config_kwargs={'overwrite': True}
+        MetaLightningModule,
+        MetaDataModule,
+        save_config_kwargs={'overwrite': True},
+        seed_everything_default=42,
     )

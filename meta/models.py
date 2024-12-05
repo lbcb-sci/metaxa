@@ -112,7 +112,9 @@ class CNNEncodingTransformer(nn.Module):
         nn.init.normal_(self.cls_token, std=1e-6)
 
     def create_attn_mask(self, lens: torch.Tensor, device=torch.device) -> torch.Tensor:
-        lens_after_cnn = (lens - self.kernel_size) // 5 + 1
+        lens_after_cnn = (lens - self.kernel_size) // self.stride + 1
+        lens_after_cnn += 1  # due to cls token
+
         arange = torch.arange(lens_after_cnn.max(), device=device).expand(
             (len(lens_after_cnn), -1)
         )
