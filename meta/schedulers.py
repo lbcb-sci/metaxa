@@ -31,6 +31,7 @@ def get_cosine_schedule_with_warmup(
     optimizer: Optimizer,
     num_warmup_steps: int,
     num_training_steps: int,
+    min_lambda: float,
     num_cycles: float = 0.5,
     last_epoch: int = -1,
 ):
@@ -62,4 +63,9 @@ def get_cosine_schedule_with_warmup(
         num_training_steps=num_training_steps,
         num_cycles=num_cycles,
     )
-    return LambdaLR(optimizer, lr_lambda, last_epoch)
+
+    def rescale_lambda(step):
+        lmbd = lr_lambda(step)
+        return lmbd * (1 - min_lambda) + min_lambda
+
+    return LambdaLR(optimizer, rescale_lambda, last_epoch)

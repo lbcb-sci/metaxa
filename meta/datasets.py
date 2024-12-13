@@ -205,7 +205,7 @@ def one_hot_encoding(seq):
 class BadReadTransform:
     def __init__(
         self,
-        identity_params: Tuple[float, float, float] = (95, 100, 2.5),
+        identity_params: Tuple[float, float, float] = (90, 98, 5),
         error_model: str = 'nanopore2020',
         glitch_params: Tuple[float, float, float] = (10000, 25, 25),
     ):
