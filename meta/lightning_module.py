@@ -67,7 +67,7 @@ class MetaLightningModule(L.LightningModule):
             weight_decay=self.hparams.wd,
         )
 
-        min_lambda = self.hparams.lr / self.hparams.min_lr
+        min_lambda = self.hparams.min_lr / self.hparams.lr
         scheduler = get_cosine_schedule_with_warmup(
             optimizer, self.hparams.warmup, self.trainer.max_steps, min_lambda
         )

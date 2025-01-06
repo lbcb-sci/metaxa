@@ -97,28 +97,33 @@ def mha_forward_fixed(
                     qkv, seqlen_offset=seqlen_offset, max_seqlen=rotary_max_seqlen
                 )
             if inference_params is None:
-                if not self.checkpointing:
-                    if self.use_flash_attn:
-                        qkv_unpad, indices, cu_seqlens, max_seq_len = unpad_input(
-                            qkv, key_padding_mask
-                        )
-                        kwargs = {'cu_seqlens': cu_seqlens, 'max_seqlen': max_seq_len}
-
-                        context = self.inner_attn(qkv_unpad, **kwargs)
-
-                        context = pad_input(
-                            context,
-                            indices,
-                            qkv.size(0),
-                            qkv.size(1),
-                        )
-                    else:
-                        kwargs = {'key_padding_mask': key_padding_mask}
-                        context = self.inner_attn(qkv, **kwargs)
-                else:
-                    context = torch.utils.checkpoint.checkpoint(
-                        self.inner_attn, qkv, **kwargs
+                if self.use_flash_attn:
+                    qkv_unpad, indices, cu_seqlens, max_seq_len = unpad_input(
+                        qkv, key_padding_mask
                     )
+                    kwargs = {'cu_seqlens': cu_seqlens, 'max_seqlen': max_seq_len}
+
+                    if not self.checkpointing or not self.training:
+                        context = self.inner_attn(qkv_unpad, **kwargs)
+                    else:
+                        context = torch.utils.checkpoint.checkpoint(
+                            self.inner_attn,
+                            qkv_unpad,
+                            None,
+                            cu_seqlens,
+                            max_seq_len,
+                            use_reentrant=True,
+                        )
+
+                    context = pad_input(
+                        context,
+                        indices,
+                        qkv.size(0),
+                        qkv.size(1),
+                    )
+                else:
+                    kwargs = {'key_padding_mask': key_padding_mask}
+                    context = self.inner_attn(qkv, **kwargs)
             else:
                 context = self._update_kvcache_attention(
                     qkv[:, :, 0], qkv[:, :, 1:], inference_params

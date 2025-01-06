@@ -71,6 +71,7 @@ class CNNEncodingTransformer(nn.Module):
         n_layers: int,
         n_heads: int,
         dim_ff: int,
+        checkpointing: bool = False,
     ) -> None:
         super().__init__()
 
@@ -87,7 +88,12 @@ class CNNEncodingTransformer(nn.Module):
         self.cls_token = nn.Parameter(torch.zeros(1, 1, d_model))
 
         self.encoder = TransformerEncoder(
-            n_layers, d_model, n_heads, dim_ff, use_flash_attn=USE_FLASH_ATTN
+            n_layers,
+            d_model,
+            n_heads,
+            dim_ff,
+            use_flash_attn=USE_FLASH_ATTN,
+            checkpointing=checkpointing,
         )
 
         self.reset_parameters()
@@ -132,6 +138,7 @@ class TransformerEncoder(nn.Module):
         dim_ff: int,
         use_flash_attn: bool,
         dropout: int = 0.1,
+        checkpointing: bool = False,
     ):
         super().__init__()
 
@@ -139,7 +146,14 @@ class TransformerEncoder(nn.Module):
 
         self.layers = nn.ModuleList(
             [
-                create_block(d_model, nhead, dim_ff, use_flash_attn, dropout=dropout)
+                create_block(
+                    d_model,
+                    nhead,
+                    dim_ff,
+                    use_flash_attn,
+                    dropout=dropout,
+                    checkpointing=checkpointing,
+                )
                 for _ in range(num_layers)
             ]
         )
@@ -229,7 +243,12 @@ class TransformerEncoder(nn.Module):
 
 
 def create_block(
-    d_model: int, nhead: int, dim_ff: int, use_flash_attn: bool, dropout: int = 0.1
+    d_model: int,
+    nhead: int,
+    dim_ff: int,
+    use_flash_attn: bool,
+    dropout: int = 0.1,
+    checkpointing: bool = False,
 ):
     head_dim = d_model // nhead
 
@@ -240,6 +259,7 @@ def create_block(
         rotary_emb_dim=int(1.0 * head_dim),
         rotary_emb_interleaved=True,
         use_flash_attn=use_flash_attn,
+        checkpointing=checkpointing,
     )
 
     mlp_cls = partial(Mlp, hidden_features=dim_ff, activation=F.silu)
