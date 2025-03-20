@@ -98,7 +98,7 @@ def mha_forward_fixed(
                 )
             if inference_params is None:
                 if self.use_flash_attn:
-                    qkv_unpad, indices, cu_seqlens, max_seq_len = unpad_input(
+                    qkv_unpad, indices, cu_seqlens, max_seq_len, _ = unpad_input(
                         qkv, key_padding_mask
                     )
                     kwargs = {'cu_seqlens': cu_seqlens, 'max_seqlen': max_seq_len}

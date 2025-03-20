@@ -1,17 +1,17 @@
 import torch
-import torch.nn.functional as F
 import torch.utils
 from torch.utils.data import IterableDataset, DataLoader
 from Bio import SeqIO
-import numpy as np
 from tqdm import tqdm
-from more_itertools import grouper
+import pandas as pd
 
+import torch.multiprocessing as mp
+from queue import Empty
+from collections import defaultdict
 from pathlib import Path
+import json
 import argparse
 import sys
-from contextlib import ExitStack
-from itertools import chain
 
 from lightning_module import MetaLightningModule
 from datasets import one_hot_encoding
@@ -39,20 +39,20 @@ class InferenceDataset(IterableDataset):
     def __iter__(self):
         for i, record in enumerate(SeqIO.parse(self.path, self.reads_format)):
             if self.n_workers == 0 or i % self.n_workers == self.worker_id:
-                sequence = ''.join(
-                    [c if c in 'ACGT' else 'N' for c in str(record.seq).upper()]
-                )
+                sequence = str(record.seq).upper()
 
                 for start in range(
                     0, len(sequence) - self.chunk_len + 1, self.chunk_len
                 ):
                     seq = sequence[start : start + self.chunk_len]
-                    x = one_hot_encoding(seq)
-
-                    """g = grouper(
-                        seq, 5, incomplete='ignore'
-                    )  # Ignore partial (last) kmer
-                    x = torch.tensor([KMER_ENCODING[k] for k in chain(['CLS'], g)])"""
+                    try:
+                        x = one_hot_encoding(seq)
+                    except KeyError as e:
+                        print(
+                            f'Found invalid character {e} for record {record.id}.',
+                            file=sys.stderr,
+                        )
+                        continue
 
                     yield record.id, start // self.chunk_len, x
 
@@ -61,7 +61,7 @@ def infer_collate_fn(batch):
     ids, indices, x = zip(*batch)
 
     # CNN Model
-    lens = torch.tensor([b.shape[0] for b in x])  # +1 for CLS token
+    lens = torch.tensor([b.shape[0] for b in x])
 
     x = torch.nn.utils.rnn.pad_sequence(
         x, batch_first=True, padding_value=0.0
@@ -76,15 +76,63 @@ def worker_init_fn(worker_id):
     dataset.worker_id = worker_id
 
 
+def preds_consumer(metadata_path, output_path, in_queue, out_queue, dtype):
+    # Load mappings and true labels from arguments
+    with open(metadata_path, 'r') as f:
+        inference_mappings = json.load(f)
+
+    species_logits_dict = defaultdict(
+        lambda: torch.zeros(
+            len(inference_mappings['idx_to_species']), dtype=torch.float32
+        )
+    )
+    genus_logits_dict = defaultdict(
+        lambda: torch.zeros(
+            len(inference_mappings['idx_to_genus']), dtype=torch.float32
+        )
+    )
+
+    while (batch := in_queue.get()) is not None:
+        ids, y_species, y_genus = batch
+
+        for rid, logits_species, logits_genus in zip(ids, y_species, y_genus):
+            species_logits_dict[rid] += logits_species
+            genus_logits_dict[rid] += logits_genus
+
+        out_queue.put((y_species, y_genus))
+
+    results = []
+    for read_id in species_logits_dict:
+        species_logits = species_logits_dict[read_id]
+        genus_logits = genus_logits_dict[read_id]
+
+        species_idx = species_logits.argmax().item()
+        genus_idx = genus_logits.argmax().item()
+
+        results.append(
+            {
+                'read_id': read_id,
+                'Predicted Species': inference_mappings['idx_to_species'][
+                    str(species_idx)
+                ],
+                'Predicted Genus': inference_mappings['idx_to_genus'][str(genus_idx)],
+            }
+        )
+
+    df = pd.DataFrame(results)
+    if output_path is None:
+        df.to_csv(sys.stdout, sep='\t', index=False)
+    else:
+        df.to_csv(output_path, sep='\t', index=False)
+
+
 @torch.inference_mode
 def main(args: argparse.Namespace):
     device = torch.device(args.device)
 
-    model = (
-        MetaLightningModule.load_from_checkpoint(args.checkpoint, map_location=device)
-        .eval()
-        .to(dtype=torch.bfloat16)
-    )
+    model = MetaLightningModule.load_from_checkpoint(
+        args.checkpoint, map_location=device
+    ).eval()
 
     ds = InferenceDataset(args.reads, args.chunk_len, args.n_workers)
     dl = DataLoader(
@@ -96,42 +144,56 @@ def main(args: argparse.Namespace):
         pin_memory=True,
     )
 
-    with ExitStack() as stack:
-        if isinstance(args.output, str):
-            output = stack.enter_context(open(args.output, 'w'))
-        else:
-            output = args.output
+    if device.type == 'cuda' and torch.cuda.get_device_capability(device)[0] >= 8:
+        half_dtype = torch.bfloat16
+    else:
+        half_dtype = torch.float16  # Fallback to float16
 
-        # Header
-        print('read_id', 'window_id', 'logits', 'class', sep='\t', file=output)
+    in_queue, out_queue = mp.Queue(), mp.Queue()
+    consumer = mp.Process(
+        target=preds_consumer,
+        args=(args.metadata, args.output, in_queue, out_queue, half_dtype),
+    )
+    consumer.start()
 
-        for ids, indices, x, lens in tqdm(dl):
-            x = x.to(dtype=model.dtype, device=device)
-            lens = lens.to(device)
-            y = model(x, lens)
+    tqdm.write('Inference started.')
+    for ids, _, x, lens in tqdm(dl):
+        x, lens = x.to(device), lens.to(device)
+        with torch.autocast(device.type, dtype=half_dtype):
+            y_species, y_genus = model(x, lens)
 
-            for id, idx, probs in zip(
-                ids, indices, y.to(device='cpu', dtype=torch.float16).numpy()
-            ):
-                print(
-                    id,
-                    idx,
-                    ','.join([f'{p:.5f}' for p in probs]),
-                    np.argmax(probs),
-                    sep='\t',
-                    file=output,
-                )
+        y_species, y_genus = y_species.float(), y_genus.float()
+        try:
+            y_species_cpu, y_genus_cpu = out_queue.get(block=False)
+
+            if y_species_cpu.shape != y_species.shape:
+                y_species_cpu = y_species.to(device='cpu')
+                y_genus_cpu = y_genus.to(device='cpu')
+            else:
+                y_species_cpu.copy_(y_species)
+                y_genus_cpu.copy_(y_genus)
+        except Empty:
+            y_species_cpu = y_species.to(device='cpu')
+            y_genus_cpu = y_genus.to(device='cpu')
+
+        in_queue.put((ids, y_species_cpu, y_genus_cpu))
+
+    in_queue.put(None)
+
+    tqdm.write('Inference finished. Aggregating results...')
+    consumer.join()
 
 
 def get_arguments() -> argparse.Namespace:
     parser = argparse.ArgumentParser()
     parser.add_argument('reads', type=Path)
+    parser.add_argument('--metadata', '-m', type=Path, required=True)
     parser.add_argument('--checkpoint', '-c', type=Path, required=True)
     parser.add_argument('--device', '-d', type=str, default='cpu')
     parser.add_argument('--chunk_len', type=int, default=1000)
     parser.add_argument('--batch_size', '-b', type=int, default=1)
     parser.add_argument('--n_workers', type=int, default=0)
-    parser.add_argument('--output', '-o', default=sys.stdout)
+    parser.add_argument('--output', '-o', default=None)
 
     return parser.parse_args()
 
