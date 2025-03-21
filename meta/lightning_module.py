@@ -14,7 +14,6 @@ import wandb.util
 
 from datasets import MetaDataModule
 from schedulers import get_cosine_schedule_with_warmup
-from losses import nt_xent_loss
 
 from typing import Optional
 

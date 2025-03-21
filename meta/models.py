@@ -6,11 +6,6 @@ from flash_attn.modules.block import Block
 from flash_attn.modules.mha import MHA
 from flash_attn.modules.mlp import Mlp
 from flash_attn.ops.triton.layer_norm import RMSNorm
-from flash_attn.bert_padding import (
-    index_first_axis_residual,
-    pad_input,
-    unpad_input,
-)
 
 from functools import partial
 
@@ -18,30 +13,10 @@ from datasets import KMER_ENCODING
 
 try:
     USE_FLASH_ATTN = torch.cuda.get_device_capability()[0] >= 8
-
-    from layers import mha_forward_fixed
-
-    MHA.forward = mha_forward_fixed
-    # Cannot use Rotary with flash attn
-    # USE_FLASH_ATTN = False
 except RuntimeError:
     USE_FLASH_ATTN = False
 
 from typing import Optional
-
-
-class FFBlock(nn.Module):
-    def __init__(self, f_in: int, f_out: int) -> None:
-        super().__init__()
-
-        self.layers = nn.Sequential(
-            nn.Linear(f_in, f_out),
-            nn.GELU(),
-            nn.BatchNorm1d(f_out),
-        )
-
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        return self.layers(x)
 
 
 class KMerEncodingTransformer(nn.Module):
@@ -142,6 +117,10 @@ class TransformerEncoder(nn.Module):
     ):
         super().__init__()
 
+        from layers import mha_encoder_custom
+
+        MHA.forward = mha_encoder_custom
+
         self.use_flash_attn = use_flash_attn
 
         self.layers = nn.ModuleList(
@@ -164,76 +143,19 @@ class TransformerEncoder(nn.Module):
         self.dropout = nn.Dropout(p=dropout)
         self.norm = RMSNorm(d_model)
 
-    def forward(self, hidden_states, key_padding_mask=None, subset_mask=None):
-        """If subset_mask is not None, we only want output for the subset of the sequence.
-        This means that we only compute the last layer output for these tokens.
-        subset_mask: (batch, seqlen), dtype=torch.bool
-        """
+    def forward(self, hidden_states, key_padding_mask=None):
         residual = None
-        # TODO Remove True
-        if key_padding_mask is None or not self.use_flash_attn or True:
-            mixer_kwargs = (
-                {'key_padding_mask': key_padding_mask}
-                if key_padding_mask is not None
-                else None
-            )
-            for layer in self.layers:
-                hidden_states, residual = layer(
-                    hidden_states, residual, mixer_kwargs=mixer_kwargs
-                )
-            if subset_mask is not None:
-                hidden_states = hidden_states[subset_mask]
-        else:
-            batch, seqlen = hidden_states.shape[:2]
-            hidden_states, indices, cu_seqlens, max_seqlen_in_batch = unpad_input(
-                hidden_states, key_padding_mask
-            )
-            mixer_kwargs = {'cu_seqlens': cu_seqlens, 'max_seqlen': max_seqlen_in_batch}
-            if subset_mask is None:
-                for layer in self.layers:
-                    hidden_states, residual = layer(
-                        hidden_states, residual, mixer_kwargs=mixer_kwargs
-                    )
-                hidden_states = pad_input(hidden_states, indices, batch, seqlen)
-            else:
-                for layer in self.layers[:-1]:
-                    hidden_states = layer(hidden_states, mixer_kwargs=mixer_kwargs)
-                if key_padding_mask is not None:
-                    subset_idx = torch.nonzero(
-                        subset_mask[key_padding_mask], as_tuple=False
-                    ).flatten()
-                    subset_seqlens = (subset_mask & key_padding_mask).sum(
-                        dim=-1, dtype=torch.int32
-                    )
-                    subset_cu_seqlens = F.pad(
-                        torch.cumsum(subset_seqlens, dim=0, dtype=torch.torch.int32),
-                        (1, 0),
-                    )
-                else:
-                    subset_idx = torch.nonzero(subset_mask, as_tuple=False).flatten()
-                    subset_seqlens = subset_mask.sum(dim=-1, dtype=torch.int32)
-                    subset_cu_seqlens = F.pad(
-                        torch.cumsum(subset_seqlens, dim=0, dtype=torch.torch.int32),
-                        (1, 0),
-                    )
-                hidden_states_subset, hidden_states = index_first_axis_residual(
-                    hidden_states, subset_idx
-                )
-                # It's ok to set max_seqlen_q to be much larger
-                mixer_kwargs = {
-                    'x_kv': hidden_states,
-                    'cu_seqlens': subset_cu_seqlens,
-                    'max_seqlen': max_seqlen_in_batch,
-                    'cu_seqlens_k': cu_seqlens,
-                    'max_seqlen_k': max_seqlen_in_batch,
-                }
-                hidden_states = self.layers[-1](
-                    hidden_states_subset, mixer_kwargs=mixer_kwargs
-                )
 
-        # TODO: Use subset mask from flash attention for last layer
-        # TODO: IT SHOULD BE ADD + DROPOUT + LN -> Return this for KMER
-        # x = self.norm(hidden_states[:, 0])
+        mixer_kwargs = (
+            {'key_padding_mask': key_padding_mask}
+            if key_padding_mask is not None
+            else None
+        )
+
+        for layer in self.layers:
+            hidden_states, residual = layer(
+                hidden_states, residual, mixer_kwargs=mixer_kwargs
+            )
 
         hidden_states, residual = hidden_states[:, 0], residual[:, 0]
         residual = self.dropout(hidden_states) + residual
