@@ -27,6 +27,7 @@ def mha_encoder_custom(
 
         Adapted from flash-attention
         https://github.com/Dao-AILab/flash-attention/blob/main/flash_attn/modules/mha.py#L587
+        The original code is licensed under the BSD 3-Clause License.
     """
     if not self.cross_attn and self.num_heads_kv == self.num_heads:
         assert x_kv is None and mixer_subset is None
