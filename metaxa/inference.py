@@ -9,7 +9,6 @@ import torch.multiprocessing as mp
 from queue import Empty
 from collections import defaultdict
 from pathlib import Path
-import json
 import argparse
 import sys
 
@@ -76,20 +75,17 @@ def worker_init_fn(worker_id):
     dataset.worker_id = worker_id
 
 
-def preds_consumer(metadata_path, output_path, in_queue, out_queue, dtype):
-    # Load mappings and true labels from arguments
-    with open(metadata_path, 'r') as f:
-        inference_mappings = json.load(f)
+def preds_consumer(checkpoint_path, output_path, in_queue, out_queue):
+    data = torch.load(checkpoint_path, map_location='cpu')
+    idx_to_species = data['idx_to_species']
+    idx_to_genus = data['idx_to_genus']
+    del data
 
     species_logits_dict = defaultdict(
-        lambda: torch.zeros(
-            len(inference_mappings['idx_to_species']), dtype=torch.float32
-        )
+        lambda: torch.zeros(len(idx_to_species), dtype=torch.float32)
     )
     genus_logits_dict = defaultdict(
-        lambda: torch.zeros(
-            len(inference_mappings['idx_to_genus']), dtype=torch.float32
-        )
+        lambda: torch.zeros(len(idx_to_genus), dtype=torch.float32)
     )
 
     while (batch := in_queue.get()) is not None:
@@ -112,10 +108,8 @@ def preds_consumer(metadata_path, output_path, in_queue, out_queue, dtype):
         results.append(
             {
                 'read_id': read_id,
-                'Predicted Species': inference_mappings['idx_to_species'][
-                    str(species_idx)
-                ],
-                'Predicted Genus': inference_mappings['idx_to_genus'][str(genus_idx)],
+                'species_taxid': idx_to_species[species_idx],
+                'genus_taxid': idx_to_genus[genus_idx],
             }
         )
 
@@ -126,7 +120,7 @@ def preds_consumer(metadata_path, output_path, in_queue, out_queue, dtype):
         df.to_csv(output_path, sep='\t', index=False)
 
 
-@torch.inference_mode
+@torch.inference_mode()
 def main(args: argparse.Namespace):
     device = torch.device(args.device)
 
@@ -144,17 +138,17 @@ def main(args: argparse.Namespace):
         pin_memory=True,
     )
 
+    in_queue, out_queue = mp.Queue(), mp.Queue()
+    consumer = mp.Process(
+        target=preds_consumer,
+        args=(args.checkpoint, args.output, in_queue, out_queue),
+    )
+    consumer.start()
+
     if device.type == 'cuda' and torch.cuda.get_device_capability(device)[0] >= 8:
         half_dtype = torch.bfloat16
     else:
         half_dtype = torch.float16  # Fallback to float16
-
-    in_queue, out_queue = mp.Queue(), mp.Queue()
-    consumer = mp.Process(
-        target=preds_consumer,
-        args=(args.metadata, args.output, in_queue, out_queue, half_dtype),
-    )
-    consumer.start()
 
     tqdm.write('Inference started.')
     for ids, _, x, lens in tqdm(dl):
@@ -187,7 +181,6 @@ def main(args: argparse.Namespace):
 def get_arguments() -> argparse.Namespace:
     parser = argparse.ArgumentParser()
     parser.add_argument('reads', type=Path)
-    parser.add_argument('--metadata', '-m', type=Path, required=True)
     parser.add_argument('--checkpoint', '-c', type=Path, required=True)
     parser.add_argument('--device', '-d', type=str, default='cpu')
     parser.add_argument('--chunk_len', type=int, default=1000)
