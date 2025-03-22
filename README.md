@@ -16,9 +16,12 @@
    pip install flash-attn --no-build-isolation
    ```
 
+Note: The provided `requirements.txt` includes dependencies for CUDA 12.4.
+If you're using a different CUDA version, please install the appropriate version of `torch`, `torchvision`, and `torchaudio` manually, and remove their entries from `requirements.txt` before running `pip install`.
+
 3. Download model:
    ```bash
-   wget ...
+   wget -O metaxa-model.v0.1.ckpt  https://zenodo.org/records/15062544/files/metaxa-model.v0.1.ckpt?download=1
    ```
 
 ## Usage
@@ -50,3 +53,7 @@ The output is a TSV file where each row contains:
 ## Acknowledgements
 
 This research is supported by the Singapore Ministry of Health’s National Medical Research Council under its Open Fund – Individual Research Grants (NMRC/OFIRG/MOH-000649-00).
+
+## Citing Metaxa
+
+Coming soon.
